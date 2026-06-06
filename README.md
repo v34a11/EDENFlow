@@ -9,6 +9,18 @@ We further design a reduced-complexity lightweight variant that improves computa
 
 Experiments show that EDENFlow produces sharper, more temporally consistent results and performs better in high-motion scenarios while remaining efficient.
 
+<div>
+    <h4 align="center">
+        <img src="./assets/comparision.png">
+    </h4>
+</div>
+
+
+## 🛠️ Pipeline
+<div align="center">
+  <img src="./assets/flow_dit.png"/>
+</div><br/>
+
 ## :hammer: Quick Start
 
 ### Clone the Repository
@@ -58,9 +70,9 @@ Please download the datasets ([LAVIB](https://github.com/alexandrosstergiou/LAVI
 ```
 
 ### Download Checkpoints
-EDEN baseline provide pre-trained model weights, available for download [here](https://huggingface.co/zhZ524/EDEN/tree/main), and recommend saving them in the `checkpoints` folder.
+EDEN baseline provide pre-trained model weights, available for download [here](https://huggingface.co/zhZ524/EDEN/tree/main) and recommend saving them in the `checkpoints` folder.
 
-Our EDENFlow model checkpoint are that [here] and recommend saving them in the `checkpoints` folder.
+Our EDENFlow model checkpoint are that [here](https://github.com/v34a11/EDENFlow/releases/tag/v1.0) and recommend saving them in the `checkpoints` folder.
 
 
 ### Evaluation
