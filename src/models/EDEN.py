@@ -30,6 +30,11 @@ class EDEN(nn.Module):
         self.patch_cond_dec = nn.Conv2d(in_dim, hidden_dim, kernel_size=patch_size, stride=patch_size)
         self.norm_cond_dec = norm_layer(hidden_dim)
         self.proj_token = nn.Linear(latent_dim, hidden_dim)
+
+        # --- Flow conditioning ---
+        self.proj_flow = nn.Conv2d(2, hidden_dim, kernel_size=16, stride=16)
+        self.norm_flow = norm_layer(hidden_dim)
+
         self.decoder_blocks = nn.ModuleList([
             VAEBlock(hidden_dim, num_heads, mlp_ratio, qkv_bias, attn_drop_rate, proj_drop_rate, act_layer, norm_layer,
                      use_xformers, is_encoder=False, add_attn_decoder=add_attn_decoder, add_attn_type=add_attn_type)
@@ -50,6 +55,15 @@ class EDEN(nn.Module):
         x_dec = self.patch_cond_dec(x).flatten(2).transpose(1, 2)
         x_dec = self.norm_cond_dec(x_dec + self.pos_embedding)
         return x_dit, x_dec
+    
+    def patch_flow(self, flow_fwd, flow_bwd):
+        fwd = self.proj_flow(flow_fwd).flatten(2).transpose(1, 2)
+        bwd = self.proj_flow(flow_bwd).flatten(2).transpose(1, 2)
+
+        pos = get_pos_embedding(self.ph, self.pw, 1, self.dim).to(fwd.device)
+        fwd = self.norm_flow(fwd + pos)
+        bwd = self.norm_flow(bwd + pos)
+        return fwd, bwd
 
     def postprocess(self, x):
         return x * self.stats[1] + self.stats[0]
@@ -73,10 +87,13 @@ class EDEN(nn.Module):
         recon_frames = self.postprocess(self.pixel_shuffle(recon_tokens))
         return recon_frames
 
-    def denoise(self, query_latents, denoise_timestep, cond_frames, difference):
+    def denoise(self, query_latents, denoise_timestep, cond_frames, difference, flow_fwd, flow_bwd):
         self.ph, self.pw = cond_frames.shape[-2] // 16, cond_frames.shape[-1] // 16
         cond_dit, self.cond_dec = self.patch_cond(cond_frames)
         tokens_0, tokens_1 = cond_dit.chunk(2, dim=0)
+        
+        flow_fwd_tokens, flow_bwd_tokens = self.patch_flow(flow_fwd, flow_bwd)
+
         denoise_timestep_embedding = self.denoise_timestep_embedder(denoise_timestep)
         difference_embedding = self.difference_embedder(difference)
         condition_embedding = denoise_timestep_embedding + difference_embedding
@@ -84,7 +101,7 @@ class EDEN(nn.Module):
         self.query_pos_embedding = get_pos_embedding(self.ph, self.pw, 2, self.dim).to(query_latents.device)
         query_embedding = self.proj_in(query_latents) + self.query_pos_embedding
         for blk in self.dit_blocks:
-            query_embedding = blk(query_embedding, tokens_0, tokens_1, self.ph, self.pw, modulations)
+            query_embedding = blk(query_embedding, tokens_0, tokens_1, flow_fwd_tokens, flow_bwd_tokens, self.ph, self.pw, modulations)
         query_latents = self.proj_out(self.norm_out(query_embedding))
         query_latents, _ = query_latents.chunk(2, dim=-1)
         return query_latents

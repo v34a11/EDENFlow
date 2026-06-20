@@ -17,13 +17,25 @@ from glob import glob
 import yaml
 import warnings
 
+
+from src.utils import InputPadder
+
+from src.utils import preprocess_frames
+
+from RAFT.raft_utils import (
+    load_raft_model,
+    compute_raft_warp
+)
+
+from gmflow.gmflow_utils import load_gmflow_model, compute_gmflow_warp_batched
+
+
 warnings.filterwarnings("ignore")
 logger = get_logger(__name__, log_level="INFO")
 
-
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="configs/eval_eden.yaml")
+    parser.add_argument("--config", type=str, default="configs/eval.yaml")
     args = parser.parse_args()
     with open(args.config, "r") as f:
         update_args = yaml.unsafe_load(f)
@@ -74,13 +86,34 @@ def main():
     model = load_model(model_name, **args.model_args)
     logger.info(f"{model_name} Parameters: {sum(p.numel() for p in model.parameters()):,}")
     ckpt = torch.load(args.pretrained_eden_path, map_location="cpu")
+    print(args.pretrained_eden_path)
+    print("ckecpint keys: ",ckpt.keys())
     model.load_state_dict(ckpt["eden"])
     transport = create_transport("Linear", "velocity")
     sampler = Sampler(transport)
     sample_fn = sampler.sample_ode(sampling_method="euler", num_steps=2, atol=1e-6, rtol=1e-3)
     cal_metrics = CalMetrics()
 
-    model, dataloader = accelerator.prepare(model, dataloader)
+    # flow_model = load_raft_model(
+    #     "./checkpoints/raft.pth"
+    # )
+
+    flow_model = load_gmflow_model(
+        "./checkpoints/gmflow.pth",
+        with_refine=True
+    )
+
+    flow_model.requires_grad_(False)
+
+    flow_model.eval()
+
+    model, flow_model, dataloader = (
+        accelerator.prepare(
+            model,
+            flow_model,
+            dataloader
+        )
+    )
 
     # begin training
     model.eval()
@@ -90,21 +123,148 @@ def main():
     results = {"PSNR": 0., "SSIM": 0., "LPIPS": 0., "FloLPIPS": 0., "L1": 0.}
     logger.info(f"Evaluating for {steps_one_epoch} steps...")
     for _, batch in enumerate(dataloader):
-        frames = batch / 255.
-        frame_0, frame_1, gt = frames[:, 0, ...], frames[:, 1, ...], frames[:, 2, ...]
-        difference = ((torch.mean(torch.cosine_similarity(frame_0, frame_1), dim=[1, 2]) - args.cos_sim_mean) / args.cos_sim_std).unsqueeze(1).to(accelerator.device)
-        img_size = [frame_0.shape[2], frame_0.shape[3]]
-        padder = InputPadder(img_size)
-        cond_frames = padder.pad(torch.cat((frame_0, frame_1), dim=0))
+        frames = batch / 1.
+
+        rgb_0 = frames[:, 0]
+        rgb_1 = frames[:, 1]
+        gt = frames[:, 2]
+
+        # -------------------------------------------------
+        # FLOW
+        # -------------------------------------------------
+
+        # with torch.no_grad():
+
+        #     (
+        #         fwd_flow,
+        #         bwd_flow,
+        #         _,
+        #         _
+        #     ) = compute_raft_warp(
+        #         flow_model.module
+        #         if hasattr(flow_model, "module")
+        #         else flow_model,
+        #         rgb_0,
+        #         rgb_1
+        #     )
         with torch.no_grad():
+            fwd_flow, bwd_flow = compute_gmflow_warp_batched(
+                flow_model,
+                rgb_0,
+                rgb_1,
+                sub_bs=1
+            )
+
+        fwd_flow = fwd_flow.detach()
+
+        bwd_flow = bwd_flow.detach()
+
+        # -------------------------------------------------
+        # PREPROCESS
+        # -------------------------------------------------
+
+        (
+            frames,
+            padder,
+            frame_0,
+            frame_1,
+            gt
+        ) = preprocess_frames(frames)
+
+        # -------------------------------------------------
+        # PAD FLOWS
+        # -------------------------------------------------
+
+        fwd_flow = padder.pad(fwd_flow)
+
+        bwd_flow = padder.pad(bwd_flow)
+
+        # -------------------------------------------------
+        # CONDITIONING
+        # -------------------------------------------------
+
+        cond_frames = torch.cat(
+            (frame_0, frame_1),
+            dim=0
+        )
+
+        cond_frames = padder.pad(cond_frames)
+
+        difference = (
+            (
+                torch.mean(
+                    torch.cosine_similarity(
+                        frame_0,
+                        frame_1
+                    ),
+                    dim=[1, 2]
+                )
+                - args.cos_sim_mean
+            )
+            / args.cos_sim_std
+        ).unsqueeze(1).to(
+            accelerator.device
+        )
+
+        # -------------------------------------------------
+        # SAMPLE
+        # -------------------------------------------------
+
+        with torch.no_grad():
+
             b, _, h, w = cond_frames.shape
-            print("cond_frames shape: ", cond_frames.shape)
-            noise = torch.randn([b // 2, h // 32 * w // 32, args.model_args["latent_dim"]]).to(accelerator.device)
-            denoise_kwargs = {"cond_frames": cond_frames, "difference": difference}
-            samples = sample_fn(noise, model.denoise, **denoise_kwargs)[-1]
-            denoise_latents = samples / args.vae_scaler + args.vae_shift
-            generated_frames = model.decode(denoise_latents)
-            generated_frames = padder.unpad(generated_frames.clamp(0., 1.))
+
+            noise = torch.randn(
+                [
+                    b // 2,
+                    (h // 32) * (w // 32),
+                    args.model_args["latent_dim"]
+                ]
+            ).to(accelerator.device)
+
+            denoise_kwargs = {
+
+                "cond_frames": cond_frames,
+
+                "difference": difference,
+
+                "flow_fwd": fwd_flow,
+
+                "flow_bwd": bwd_flow
+            }
+
+            model_unwrap = (
+                model.module
+                if hasattr(model, "module")
+                else model
+            )
+
+            samples = sample_fn(
+                noise,
+                model_unwrap.denoise,
+                **denoise_kwargs
+            )[-1]
+
+            denoise_latents = (
+                samples
+                / args.vae_scaler
+                + args.vae_shift
+            )
+
+            generated_frames = (
+                model_unwrap.decode(
+                    denoise_latents
+                )
+            )
+
+            generated_frames = (
+                padder.unpad(
+                    generated_frames.clamp(
+                        0.,
+                        1.
+                    )
+                )
+            )
         psnr = cal_metrics.cal_psnr(generated_frames, gt)
         ssim = cal_metrics.cal_ssim(generated_frames, gt)
         lpips = cal_metrics.cal_lpips(generated_frames, gt)
@@ -152,4 +312,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -43,7 +43,7 @@ resolutions:
 dataset_args:
   LAVIB:
     split_name: "train"
-    data_dir: ./Dataset/LAVIB/frames_all
+    data_dir: ./Dataset/LAVIB
     height: 480
     width: 854
     dur_list: [3, 5, 7]

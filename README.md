@@ -76,9 +76,9 @@ Our EDENFlow model checkpoint are that [here](https://github.com/v34a11/EDENFlow
 
 
 ### Evaluation
-To evaluate eden, running the following command(change the evaluation dataset in `congfigs/eval_eden.yaml`): 
+To evaluate eden, running the following command(change the evaluation dataset in `congfigs/eval.yaml`): 
 ```
-python eval_dit.py
+python eval.py
 ```
 
 ### Training
@@ -90,4 +90,4 @@ EDEN training consists of two stages: **eden_vae** and **eden_dit**. Use the fol
 Training parameters can be adjusted in `configs/train_vae.yaml` and `configs/train_dit.yaml`. Logs are saved in the `output` folder.
 
 ## Acknowledgement
-Our code is adapted from [EDEN](https://github.com/bbldCVer/EDEN.git) and [RAFT](https://github.com/princeton-vl/RAFT.git). Thanks to the team for their impressive work!
+Our code is adapted from [EDEN](https://github.com/bbldCVer/EDEN.git), [GMFlow](https://github.com/lakonik/gmflow) and [RAFT](https://github.com/princeton-vl/RAFT.git). Thanks to the team for their impressive work!
